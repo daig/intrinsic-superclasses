@@ -1,14 +1,19 @@
 name:                intrinsic-superclasses
 version:             0.1.0.0
--- synopsis:
--- description:
+synopsis:           A quasiquoter implementation of the Intrinsic Superclasses Proposal
+description:
+  A template haskell implementation of the
+  <https://ghc.haskell.org/trac/ghc/wiki/IntrinsicSuperclasses Intrinsic Superclasses Proposal>,
+  which allows defining all superclass methods at the "root"
+  of the class heirarchy in one declaration, rather than
+  an instance declaration per class
 homepage:            https://github.com/daig/intrinsic-superclasses#readme
-license:             BSD3
+license:             MIT
 license-file:        LICENSE
 author:              Dai
 maintainer:          dailectic@gmail.com
 copyright:           Sodality
-category:            Web
+category:            Language
 build-type:          Simple
 extra-source-files:  README.md
 cabal-version:       >=1.10
@@ -19,14 +24,10 @@ library
   exposed-modules:     Language.Haskell.TH.Instances
   build-depends:       base >= 4.7 && < 5
                       ,template-haskell
-                      ,pretty-simple
-                      ,text
                       ,haskell-src-meta
-                      ,heredoc
                       ,containers
                       ,mtl
   default-language:    Haskell2010
-  default-extensions:  LambdaCase
 
 source-repository head
   type:     git
