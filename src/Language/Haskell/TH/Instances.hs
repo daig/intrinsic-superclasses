@@ -1,3 +1,6 @@
+{-# language ScopedTypeVariables #-}
+{-# language LambdaCase #-}
+{-# language ViewPatterns #-}
 module Language.Haskell.TH.Instances (instances) where
 
 import Language.Haskell.TH
@@ -6,8 +9,9 @@ import Language.Haskell.Meta.Parse (parseDecs)
 import Language.Haskell.TH.Quote (QuasiQuoter(..))
 import Data.Set (Set)
 import qualified Data.Set as S
-import Data.List (partition)
-import Control.Monad.Writer (when,lift,execWriterT,Endo(..),MonadWriter(..))
+import Data.Map (Map)
+import qualified Data.Map as M
+import Data.Monoid ((<>))
 
 -- | @QuasiQuoter@ for providing <https://ghc.haskell.org/trac/ghc/wiki/IntrinsicSuperclasses intrinsic-superclasses>.
 --
@@ -38,29 +42,38 @@ instances = QuasiQuoter
   where err s = const $ error $ "quasiquoter `instances` expected Dec, instead used as " ++ s
   
 
+-- | Implements the @instances@ quasiquoter ast tranform
 splitInstances :: Dec -> DecsQ
-splitInstances d = case d of
-  InstanceD _overlaps ctx ty@(AppT _ instanceFor) instanceMethods ->
-    let
-      go methods t = case t of
-        AppT (ConT className) _ -> do
-          (superclasses,classMethods) <- lift $ reifyClass className 
-          let (theseMethods,methods') = partition (\x -> defOccName x `S.member` classMethods) methods
-          when (length theseMethods > 0) $ tellCons $ InstanceD Nothing ctx (AppT (ConT className) instanceFor) theseMethods
-          mapM_ (go methods') superclasses
-        _ -> error $ "splitInstances: malformed instance head (" ++ show t ++ ")"
-        {-_ -> pure ()-}
-    in (`appEndo` []) <$> execWriterT (go instanceMethods ty)
-  _ -> error $ "splitInstances: not an instance declaration " ++ show d
+splitInstances = \case
+  InstanceD Nothing ctx (AppT _ instancesFor) instanceMethods -> do
+    let instanceMethods' = M.fromList [(defName d,d) | d <- instanceMethods]
+    classOps <- getClassOps instanceMethods 
+    let classDefs = M.map (\(S.map (occName . snd) -> names) -> (M.mapKeys occName instanceMethods' M.!) `S.map` names) classOps
+    pure $ M.foldrWithKey (\c ms -> (declInstance ctx c instancesFor ms :)) [] classDefs
+  d -> error $ "splitInstances: Not an instance declaration\n" ++ pprint d
+
+-- | helper constructor for declaring an instance
+declInstance :: Cxt -> Name -> Type -> Set Dec -> Dec
+declInstance ctx className targetType ms = InstanceD Nothing ctx (AppT (ConT className) targetType) (S.toList ms)
+    
+-- | Create a Map of className to method declaration from a list of instance method definitions
+getClassOps :: Traversable t => t Dec -> Q (Map ParentName (Set (Type,Name)))
+getClassOps decs = collectFromList S.singleton <$> mapM (\d -> opClass <$> reify (defName d)) decs
   where
-    tellCons = tell . Endo . (:)
-    defOccName x = case x of
-      FunD (Name occ _) _ -> occ
-      ValD (VarP (Name occ _)) _ _ -> occ
-      _ -> error $ "defOccName: not a function or value definition " ++ show x
-    reifyClass :: Name -> Q (Cxt,Set OccName)
-    reifyClass n = do
-      info <- reify n
-      pure $ case info of
-        ClassI (ClassD ctx _name  _tyvarbndr _fundeps methods) _instances -> (ctx,S.fromList [occ | SigD (Name occ _) _ <- methods])
-        _ -> error "reifyClass: not a class name"
+    opClass (ClassOpI n t p) = (p,(t,n))
+    opClass x = error $ "opClass: not a class operation\n" ++ pprint x
+
+-- | Get the name of a function or value declaration
+defName :: Dec -> Name
+defName x = case x of
+  FunD n _ -> n
+  ValD (VarP n) _ _ -> n
+  d -> error $ "defName: Declaration is not a Function or Value definition\n" ++ pprint d
+
+-- | Get the OccName out of a Name
+occName :: Name -> String
+occName (Name (OccName s) _) = s
+
+-- | Create a map from a Foldable collection, monoidally combining values with the same key
+collectFromList :: (Ord k,Monoid m, Foldable t) => (v -> m) -> t (k,v) -> Map k m
+collectFromList f = foldr (\(k,v) -> M.insertWith (<>) k $ f v) M.empty
