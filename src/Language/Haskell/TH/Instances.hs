@@ -1,4 +1,5 @@
 {-# language ScopedTypeVariables #-}
+{-# language FlexibleInstances #-}
 {-# language MultiParamTypeClasses #-}
 {-# language FlexibleContexts #-}
 {-# language GADTs #-}
@@ -56,7 +57,9 @@ splitInstances = \case
   InstanceD Nothing ctx (AppT (ConT className) instancesFor) instanceMethods -> do
     let instanceMethods' = M.fromList [(defName d,d) | d <- instanceMethods]
     superclasses <- getTransitiveSuperclassNames className
-    classOps <- getClassOps instanceMethods superclasses
+    superclassHasInstance <- M.traverseWithKey (\k _ -> isInstance k [instancesFor]) superclasses
+    let superclasses' = M.filterWithKey (\k _ -> not $ superclassHasInstance M.! k) superclasses
+    classOps <- getClassOps instanceMethods superclasses'
     let classDefs = M.map (\(S.map occName -> names) -> (M.mapKeys occName instanceMethods' M.!) `S.map` names) classOps
     pure $ M.foldrWithKey (\c ms -> (declInstance ctx c instancesFor ms :)) [] classDefs
   d -> error $ "splitInstances: Not an instance declaration\n" ++ pprint d
@@ -109,5 +112,3 @@ getTransitiveSuperclassNames = execWriterT . go where
   go n = do
     tell $ M.singleton n S.empty
     traverse_ go =<< lift (getSuperclassNames n)
-
-
