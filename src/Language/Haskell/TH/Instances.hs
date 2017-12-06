@@ -1,4 +1,5 @@
 {-# language ScopedTypeVariables #-}
+{-# language TupleSections #-}
 {-# language FlexibleInstances #-}
 {-# language MultiParamTypeClasses #-}
 {-# language FlexibleContexts #-}
@@ -55,17 +56,21 @@ instances = QuasiQuoter
 splitInstances :: Dec -> DecsQ
 splitInstances = \case
   InstanceD Nothing ctx (AppT (ConT className) instancesFor) instanceMethods -> do
-    let instanceMethods' = M.fromList [(defName d,d) | d <- instanceMethods]
+    instanceMethods' <- M.fromList <$> traverse globalizeDef instanceMethods
     superclasses <- getTransitiveSuperclassNames className
     superclassHasInstance <- M.traverseWithKey (\k _ -> isInstance k [instancesFor]) superclasses
     let superclasses' = M.filterWithKey (\k _ -> not $ superclassHasInstance M.! k) superclasses
     classOps <- getClassOps instanceMethods superclasses'
-    let classDefs = M.map (\(S.map occName -> names) -> (M.mapKeys occName instanceMethods' M.!) `S.map` names) classOps
+    let classDefs = M.map (\names -> (instanceMethods' M.!) `S.map` names) classOps
     pure $ M.foldrWithKey (\c ms -> (declInstance ctx c instancesFor ms :)) [] classDefs
   d -> error $ "splitInstances: Not an instance declaration\n" ++ pprint d
   where
     occName (Name (OccName s) _) = s
     declInstance ctx className targetType ms = InstanceD Nothing ctx (AppT (ConT className) targetType) (S.toList ms)
+    -- Associate a definition with its toplevel qualified identifier
+    globalizeDef d = (lookupValueName . occName . defName) d >>= \case
+        Nothing -> error $ "globalizeDef: instance method " ++ show (occName (defName d)) ++ " not in scope"
+        Just n -> pure (n,d)
     
 -- | Create a Map of className to method declaration from a list of instance method definitions
 getClassOps :: Traversable t => t Dec -> Map ParentName (Set Name) -> Q (Map ParentName (Set Name))
