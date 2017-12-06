@@ -1,4 +1,7 @@
 {-# language ScopedTypeVariables #-}
+{-# language MultiParamTypeClasses #-}
+{-# language FlexibleContexts #-}
+{-# language GADTs #-}
 {-# language LambdaCase #-}
 {-# language ViewPatterns #-}
 module Language.Haskell.TH.Instances (instances) where
@@ -11,16 +14,20 @@ import Data.Set (Set)
 import qualified Data.Set as S
 import Data.Map (Map)
 import qualified Data.Map as M
-import Data.Monoid ((<>))
+import Data.Maybe (mapMaybe)
+import Control.Monad.Writer
+import Data.Foldable
 
 -- | @QuasiQuoter@ for providing <https://ghc.haskell.org/trac/ghc/wiki/IntrinsicSuperclasses intrinsic-superclasses>.
 --
 -- Example:
 --
 -- >  class Semigroup a where mappend :: a -> a -> a
+-- >  class Semigroup a => Commutative a
 -- >  class Semigroup a => Monoid a where mempty :: a
--- >  class (Monoid a) => Group a where inverse :: a -> a
--- >  [instances| Num a => Group a where
+-- >  class Monoid a => Group a where inverse :: a -> a
+-- >  class (Commutative a, Group a) => CommutativeGroup a
+-- >  [instances| Num a => CommutativeGroup a where
 -- >      mempty = fromInteger 0
 -- >      mappend a b = a + b
 -- >      inverse = negate
@@ -29,8 +36,10 @@ import Data.Monoid ((<>))
 -- will generate the appropriate instances for @Semigroup@, @Monoid@, and @Group@:
 --
 -- >  instance Num a => Semigroup a where mappend a b = a + b
+-- >  instance Num a => Commutative a
 -- >  instance Num a => Monoid a where mempty = fromInteger 0
 -- >  instance Num a => Group a where inverse = negate
+-- >  instance Num a => CommutativeGroup a
 instances :: QuasiQuoter
 instances = QuasiQuoter
   {quoteExp = err "Exp"
@@ -40,27 +49,26 @@ instances = QuasiQuoter
     Left e -> error e
     Right d -> fmap concat $ mapM splitInstances d}
   where err s = const $ error $ "quasiquoter `instances` expected Dec, instead used as " ++ s
-  
 
--- | Implements the @instances@ quasiquoter ast tranform
+-- | Implements the @instances@ quasiquoter ast transform
 splitInstances :: Dec -> DecsQ
 splitInstances = \case
-  InstanceD Nothing ctx (AppT _ instancesFor) instanceMethods -> do
+  InstanceD Nothing ctx (AppT (ConT className) instancesFor) instanceMethods -> do
     let instanceMethods' = M.fromList [(defName d,d) | d <- instanceMethods]
-    classOps <- getClassOps instanceMethods 
-    let classDefs = M.map (\(S.map (occName . snd) -> names) -> (M.mapKeys occName instanceMethods' M.!) `S.map` names) classOps
+    superclasses <- getTransitiveSuperclassNames className
+    classOps <- getClassOps instanceMethods superclasses
+    let classDefs = M.map (\(S.map occName -> names) -> (M.mapKeys occName instanceMethods' M.!) `S.map` names) classOps
     pure $ M.foldrWithKey (\c ms -> (declInstance ctx c instancesFor ms :)) [] classDefs
   d -> error $ "splitInstances: Not an instance declaration\n" ++ pprint d
-
--- | helper constructor for declaring an instance
-declInstance :: Cxt -> Name -> Type -> Set Dec -> Dec
-declInstance ctx className targetType ms = InstanceD Nothing ctx (AppT (ConT className) targetType) (S.toList ms)
+  where
+    occName (Name (OccName s) _) = s
+    declInstance ctx className targetType ms = InstanceD Nothing ctx (AppT (ConT className) targetType) (S.toList ms)
     
 -- | Create a Map of className to method declaration from a list of instance method definitions
-getClassOps :: Traversable t => t Dec -> Q (Map ParentName (Set (Type,Name)))
-getClassOps decs = collectFromList S.singleton <$> mapM (\d -> opClass <$> reify (defName d)) decs
+getClassOps :: Traversable t => t Dec -> Map ParentName (Set Name) -> Q (Map ParentName (Set Name))
+getClassOps decs superclasses = collectFromList S.insert superclasses <$> mapM (\d -> opClass <$> reify (defName d)) decs
   where
-    opClass (ClassOpI n t p) = (p,(t,n))
+    opClass (ClassOpI n _t p) = (p,n)
     opClass x = error $ "opClass: not a class operation\n" ++ pprint x
 
 -- | Get the name of a function or value declaration
@@ -70,10 +78,36 @@ defName x = case x of
   ValD (VarP n) _ _ -> n
   d -> error $ "defName: Declaration is not a Function or Value definition\n" ++ pprint d
 
--- | Get the OccName out of a Name
-occName :: Name -> String
-occName (Name (OccName s) _) = s
 
--- | Create a map from a Foldable collection, monoidally combining values with the same key
-collectFromList :: (Ord k,Monoid m, Foldable t) => (v -> m) -> t (k,v) -> Map k m
-collectFromList f = foldr (\(k,v) -> M.insertWith (<>) k $ f v) M.empty
+collectFromList :: (Ord k, Foldable t) => (a -> as -> as) -> Map k as -> t (k,a) -> Map k as
+collectFromList f m0 x = foldr (\(k,a) -> M.adjust (f a) k) m0 x
+
+-- | reify the names of the direct superclasses for a class name
+getSuperclassNames :: Name -> Q [Name]
+getSuperclassNames className = do
+  ClassI (ClassD ctx _  (S.fromList . map _TyVarBndr_name -> classVars) _ _) _ <- reify className
+  let
+    -- if t represents a supeclass of n then `superclass t` is Just the superclass name, and Nothing otherwise
+    superclass :: Type -> Maybe Name
+    superclass = \case
+      AppT t (VarT v) | S.member v classVars -> Just $ headAppT t
+      AppT ConT{} _ -> Nothing
+      AppT t _ -> superclass t
+      x -> error $ show x
+  pure $ mapMaybe superclass ctx
+  where
+    _TyVarBndr_name = \case {PlainTV n -> n; KindedTV n _ -> n}
+    headAppT :: Type -> Name -- project the innermost @ConT@ in a chain of @AppT@
+    headAppT = \case
+      ConT n -> n
+      AppT t _ -> headAppT t
+      x -> error $ "headAppT: Malformed type\n" ++ show x
+
+-- | reify the names of all transitive superclasses for a class name, including itself
+getTransitiveSuperclassNames :: Name -> Q (Map Name (Set Name))
+getTransitiveSuperclassNames = execWriterT . go where
+  go n = do
+    tell $ M.singleton n S.empty
+    traverse_ go =<< lift (getSuperclassNames n)
+
+
