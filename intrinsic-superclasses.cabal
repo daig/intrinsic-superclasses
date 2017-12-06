@@ -1,5 +1,5 @@
 name:                intrinsic-superclasses
-version:             0.1.0.0
+version:             0.2.0.0
 synopsis:           A quasiquoter implementation of the Intrinsic Superclasses Proposal
 description:
   A template haskell implementation of the
