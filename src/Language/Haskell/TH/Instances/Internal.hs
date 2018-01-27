@@ -11,7 +11,8 @@ module Language.Haskell.TH.Instances.Internal
   ,module X) where
 
 import Language.Haskell.TH as X
-import Language.Haskell.TH.Instances.Defaults as X
+import Language.Haskell.TH.Instances.Internal.Utils as X
+import Language.Haskell.TH.Instances.Internal.Defaults as X
 import Language.Haskell.TH.Syntax as X hiding (lift)
 import Language.Haskell.Meta.Parse as X (parseDecs)
 import Language.Haskell.TH.Quote as X (QuasiQuoter(..))
@@ -93,7 +94,7 @@ globalizeClass c = (lookupTypeName . occName) c >>= \case
     
 -- | Create a Map of className to method declaration from a list of instance method definitions
 getClassOps :: Traversable t => t Dec -> Map ParentName (Set Name) -> Q (Map ParentName (Set Name))
-getClassOps decs superclasses = collectFromList (`M.insert` ()) superclasses <$> mapM (\d -> opClass <$> reify (defName d)) decs
+getClassOps decs superclasses = adjustMany (`M.insert` ()) superclasses <$> mapM (\d -> opClass <$> reify (defName d)) decs
   where
     opClass :: Info -> (ParentName, Name)
     opClass (ClassOpI n _t p) = (p,n)
@@ -111,9 +112,6 @@ sigName = \case
   SigD n _ -> n
   d -> error $ "sigName: Declaration is not a type signature\n" ++ pprint d
 
-
-collectFromList :: (Ord k, Foldable t) => (a -> as -> as) -> Map k as -> t (k,a) -> Map k as
-collectFromList f m0 x = foldr (\(k,a) -> M.adjust (f a) k) m0 x
 
 -- | reify the names of the direct superclasses for a class name
 getSuperclassNames :: Name -> Q [Name]
@@ -139,9 +137,6 @@ getSuperclassNames className = do
 getClassMethods :: Name -> Q (Set Name)
 getClassMethods className = reify className <&> (\(ClassI (ClassD _ _ _ _ (map sigName -> methods)) _) -> fromKeys () methods)
 
-type Set k = Map k ()
-fromKeys :: Ord k => v -> [k] -> Map k v
-fromKeys z xs = let zs = z:zs in M.fromList $ zip xs zs
 -- | reify the names of all transitive superclasses for a class name, including itself
 getTransitiveSuperclassNames :: Name -> Q (Map Name (Set a))
 getTransitiveSuperclassNames = execWriterT . go where
@@ -155,6 +150,3 @@ getTransitiveSuperclassNames = execWriterT . go where
 -- > occName ''Show === "Show"
 occName :: Name -> String
 occName (Name (OccName s) _) = s
-
-(<&>) :: Functor f => f a -> (a -> b) -> f b
-(<&>) = flip (<$>)
