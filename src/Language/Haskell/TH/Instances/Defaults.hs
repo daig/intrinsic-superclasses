@@ -6,8 +6,13 @@ import Data.Map (Map)
 import qualified Data.Map as M
 import System.IO.Unsafe
 
-defaultMethod :: Name -> Name -> Q [Dec]
-defaultMethod n s = unsafePerformIO (modifyMVar defaults (\m -> return (M.insert n s m,()))) `seq` return []
+defaultMethod :: Name -> Q Exp -> Q [Dec]
+defaultMethod n qe = do
+  e <- qe
+  runIO $ modifyMVar defaults (\m -> return (M.insert n e m,()))
+  return []
 
-getDefault :: Name -> Q (Maybe Name)
-getDefault n = runIO $ M.lookup n <$> readMVar defaults
+getDefault :: Name -> Q (Maybe Dec)
+getDefault n = runIO $ fmap exp_dec . M.lookup n <$> readMVar defaults
+  where exp_dec e = ValD (VarP n) (NormalB e) []
+
