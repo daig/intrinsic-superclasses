@@ -11,11 +11,11 @@ module Language.Haskell.TH.Instances.Internal
   ,module X) where
 
 import Language.Haskell.TH as X
+import Language.Haskell.TH.Instances.Internal.Utils as X
+import Language.Haskell.TH.Instances.Internal.Defaults as X
 import Language.Haskell.TH.Syntax as X hiding (lift)
 import Language.Haskell.Meta.Parse as X (parseDecs)
 import Language.Haskell.TH.Quote as X (QuasiQuoter(..))
-import Data.Set as X (Set)
-import qualified Data.Set as S
 import Data.Map as X (Map)
 import qualified Data.Map as M
 import Data.Maybe as X (mapMaybe)
@@ -57,36 +57,49 @@ instances = QuasiQuoter
 -- | Implements the @instances@ quasiquoter ast transform
 splitInstances :: Dec -> DecsQ
 splitInstances = \case
-  InstanceD Nothing ctx (AppT (ConT className) instancesFor) instanceMethods -> do
-    instanceMethods' <- M.fromList <$> traverse globalizeDef instanceMethods
+  InstanceD Nothing ctx (AppT (ConT className) instancesFor) declaredMethods -> do
+    declaredMethods' <- M.fromList <$> traverse globalizeDef declaredMethods
     superclasses <- getTransitiveSuperclassNames className
 
-    superclassMethods <- fold <$> M.traverseWithKey (\k _ -> getClassMethods k) superclasses
-    let badMethods = filter (\x -> not $ S.member x superclassMethods) $ M.keys instanceMethods'
+    requiredMethods <- fold <$> M.traverseWithKey (\k _ -> getClassMethods k) superclasses
+    let badMethods = filter (\x -> not $ M.member x requiredMethods) $ M.keys declaredMethods'
     unless (null badMethods) $
       error $ "splitInstances: Trying to declare methods not in the superclass heirarchy\n"
            ++ unlines (map show badMethods)
 
+    defaultMethods <- M.traverseMaybeWithKey (\k _ -> getDefault k)  requiredMethods
+    let declaredMethods'' = declaredMethods' `M.union` defaultMethods
+
     superclassHasInstance <- M.traverseWithKey (\k _ -> isInstance k [instancesFor]) superclasses
-    let superclasses' = M.filterWithKey (\k _ -> not $ superclassHasInstance M.! k) superclasses
-    classOps <- getClassOps instanceMethods superclasses'
-    let classDefs = M.map (\names -> (instanceMethods' M.!) `S.map` names) classOps
+    superclasses' <- fmap (fromKeys M.empty) $ traverse globalizeClass $ filter (\k -> not $ superclassHasInstance M.! k) $ M.keys superclasses
+
+    classOps <- getClassOps (M.elems declaredMethods'') superclasses'
+
+    let classDefs = M.map (\names -> (declaredMethods'' M.!) `M.mapKeys` names) classOps
     let instanceDecls = M.foldrWithKey (\c ms -> (declInstance ctx c instancesFor ms :)) [] classDefs
     pure instanceDecls
   d -> error $ "splitInstances: Not an instance declaration\n" ++ pprint d
   where
-    declInstance ctx className targetType ms = InstanceD Nothing ctx (AppT (ConT className) targetType) (S.toList ms)
+    declInstance ctx className targetType ms = InstanceD Nothing ctx (AppT (ConT className) targetType) (M.keys ms)
     -- Associate a definition with its toplevel qualified identifier
     globalizeDef d = (lookupValueName . occName . defName) d >>= \case
         Nothing -> error $ "globalizeDef: instance method " ++ show (occName (defName d)) ++ " not in scope"
         Just n -> pure (n,d)
+
+-- | Get the fully qualified name of a class
+globalizeClass :: Name -> Q Name
+globalizeClass c = (lookupTypeName . occName) c >>= \case
+    Nothing -> error $ "globalizeClass: class " ++ show (occName c) ++ " not in scope"
+    Just n -> pure n
     
 -- | Create a Map of className to method declaration from a list of instance method definitions
 getClassOps :: Traversable t => t Dec -> Map ParentName (Set Name) -> Q (Map ParentName (Set Name))
-getClassOps decs superclasses = collectFromList S.insert superclasses <$> mapM (\d -> opClass <$> reify (defName d)) decs
+getClassOps decs superclasses = adjustMany (`M.insert` ()) superclasses <$> mapM (\d -> opClass <$> reify (defName d)) decs
   where
+    opClass :: Info -> (ParentName, Name)
     opClass (ClassOpI n _t p) = (p,n)
     opClass x = error $ "opClass: not a class operation\n" ++ pprint x
+
 
 -- | Get the name of a function or value declaration
 defName :: Dec -> Name
@@ -100,18 +113,15 @@ sigName = \case
   d -> error $ "sigName: Declaration is not a type signature\n" ++ pprint d
 
 
-collectFromList :: (Ord k, Foldable t) => (a -> as -> as) -> Map k as -> t (k,a) -> Map k as
-collectFromList f m0 x = foldr (\(k,a) -> M.adjust (f a) k) m0 x
-
 -- | reify the names of the direct superclasses for a class name
 getSuperclassNames :: Name -> Q [Name]
 getSuperclassNames className = do
-  ClassI (ClassD ctx _  (S.fromList . map _TyVarBndr_name -> classVars) _ _) _ <- reify className
+  ClassI (ClassD ctx _  (fromKeys () . map _TyVarBndr_name -> classVars) _ _) _ <- reify className
   let
     -- if t represents a supeclass of n then `superclass t` is Just the superclass name, and Nothing otherwise
     superclass :: Type -> Maybe Name
     superclass = \case
-      AppT t (VarT v) | S.member v classVars -> Just $ headAppT t
+      AppT t (VarT v) | M.member v classVars -> Just $ headAppT t
       AppT ConT{} _ -> Nothing
       AppT t _ -> superclass t
       x -> error $ show x
@@ -125,13 +135,13 @@ getSuperclassNames className = do
       x -> error $ "headAppT: Malformed type\n" ++ show x
 
 getClassMethods :: Name -> Q (Set Name)
-getClassMethods className = reify className <&> (\(ClassI (ClassD _ _ _ _ (map sigName -> methods)) _) -> S.fromList methods)
+getClassMethods className = reify className <&> (\(ClassI (ClassD _ _ _ _ (map sigName -> methods)) _) -> fromKeys () methods)
 
 -- | reify the names of all transitive superclasses for a class name, including itself
 getTransitiveSuperclassNames :: Name -> Q (Map Name (Set a))
 getTransitiveSuperclassNames = execWriterT . go where
   go n = do
-    tell $ M.singleton n S.empty
+    tell $ M.singleton n M.empty
     traverse_ go =<< lift (getSuperclassNames n)
 
 -- | Extract the unqualified part from a @Name@. For example:
@@ -140,6 +150,3 @@ getTransitiveSuperclassNames = execWriterT . go where
 -- > occName ''Show === "Show"
 occName :: Name -> String
 occName (Name (OccName s) _) = s
-
-(<&>) :: Functor f => f a -> (a -> b) -> f b
-(<&>) = flip (<$>)
