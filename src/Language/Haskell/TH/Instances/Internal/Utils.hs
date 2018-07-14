@@ -1,8 +1,11 @@
+{-# language DeriveDataTypeable #-}
 module Language.Haskell.TH.Instances.Internal.Utils
   (module Language.Haskell.TH.Instances.Internal.Utils
   ,module X) where
 import Language.Haskell.TH as X
+import Language.Haskell.TH.Syntax
 import Data.Map as X (Map, lookup,adjust,fromList,insert,traverseWithKey)
+import Data.Data
 
 mapLookup :: Ord k => k -> Map k v -> Maybe v
 mapLookup = X.lookup

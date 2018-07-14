@@ -1,5 +1,5 @@
 name: intrinsic-superclasses
-version: '0.3.0.0'
+version: '0.4.0.0'
 synopsis: A quasiquoter for better instance deriving and default methods
 description: ! 'A template haskell utility inspired by the
 

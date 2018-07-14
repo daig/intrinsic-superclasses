@@ -1,4 +1,5 @@
 {-# language ScopedTypeVariables #-}
+{-# language RecordWildCards #-}
 {-# language TupleSections #-}
 {-# language FlexibleInstances #-}
 {-# language MultiParamTypeClasses #-}
@@ -12,7 +13,7 @@ module Language.Haskell.TH.Instances.Internal
 
 import Language.Haskell.TH as X
 import Language.Haskell.TH.Instances.Internal.Utils as X
-import Language.Haskell.TH.Instances.Internal.Defaults as X
+import Language.Haskell.TH.Instances.Defaults as X
 import Language.Haskell.TH.Syntax as X hiding (lift)
 import Language.Haskell.Meta.Parse as X (parseDecs)
 import Language.Haskell.TH.Quote as X (QuasiQuoter(..))
@@ -26,11 +27,16 @@ import Data.Foldable as X
 --
 -- Example:
 --
+-- >  {-# language TemplateHaskell,QuasiQuotes,FlexibleInstances,UndecidableInstances #-}
+-- >  import Prelude hiding (Monoid(..))
+-- >  import Language.Haskell.TH.Instances
+-- >
 -- >  class Semigroup a where mappend :: a -> a -> a
 -- >  class Semigroup a => Commutative a
 -- >  class Semigroup a => Monoid a where mempty :: a
 -- >  class Monoid a => Group a where inverse :: a -> a
 -- >  class (Commutative a, Group a) => CommutativeGroup a
+-- >  $(return []) -- Only needed if classes are defined in the same module, to make sure they're in scope below
 -- >  [instances| Num a => CommutativeGroup a where
 -- >      mempty = fromInteger 0
 -- >      mappend a b = a + b
@@ -61,13 +67,14 @@ splitInstances = \case
     declaredMethods' <- M.fromList <$> traverse globalizeDef declaredMethods
     superclasses <- getTransitiveSuperclassNames className
 
-    requiredMethods <- fold <$> M.traverseWithKey (\k _ -> getClassMethods k) superclasses
+    requiredMethods <- fold <$> M.traverseWithKey (\k _ -> getClassMethods k) superclasses -- Methods that will eventually need to be filled in
     let badMethods = filter (\x -> not $ M.member x requiredMethods) $ M.keys declaredMethods'
     unless (null badMethods) $
       error $ "splitInstances: Trying to declare methods not in the superclass heirarchy\n"
            ++ unlines (map show badMethods)
 
-    defaultMethods <- M.traverseMaybeWithKey (\k _ -> getDefault k)  requiredMethods
+    defaultMethods <- (`M.intersection` requiredMethods) <$> transitiveProvidedDefaults className
+    {-defaultMethods <- M.traverseMaybeWithKey (\k _ -> getDefault k)  requiredMethods-}
     let declaredMethods'' = declaredMethods' `M.union` defaultMethods
 
     superclassHasInstance <- M.traverseWithKey (\k _ -> isInstance k [instancesFor]) superclasses
@@ -150,3 +157,25 @@ getTransitiveSuperclassNames = execWriterT . go where
 -- > occName ''Show === "Show"
 occName :: Name -> String
 occName (Name (OccName s) _) = s
+
+-- | reify the names of all transitive superclasses for a class name, including itself
+getTransitiveSuperclassNames' :: Name -> Q (Map Name Int)
+getTransitiveSuperclassNames' = execWriterT . go 0 where
+  go i n = do
+    tell $ M.singleton n i
+    traverse_ (go (i+1)) =<< lift (getSuperclassNames n)
+
+transitiveProvidedDefaults :: Name -> Q (Map Name Dec)
+transitiveProvidedDefaults n = do
+  sc <- M.toList <$> getTransitiveSuperclassNames' n
+  defaultsMap <- M.map fst . M.unionsWith lowest -- Defaults from deeper subclasses take precidence
+             <$> mapM (\(n,i) -> M.map (,i) <$> providedDefaults n) sc
+  return $ M.mapWithKey name_dec defaultsMap
+  where name_dec n def = ValD (VarP n) (NormalB (VarE def)) []
+        lowest a@(_,i) b@(_,i') = if i <= i' then a else b
+
+-- | Get the default superclass method implementations provided by a subclass
+providedDefaults :: Name -> Q (Map Name Name)
+providedDefaults (AnnLookupName -> n) = do
+  defaults <- reifyAnnotations n
+  return $ M.fromList [(defining,definition) | Defaults{..} <- defaults]
