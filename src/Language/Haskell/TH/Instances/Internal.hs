@@ -169,9 +169,9 @@ transitiveProvidedDefaults :: Name -> Q (Map Name Dec)
 transitiveProvidedDefaults n = do
   sc <- M.toList <$> getTransitiveSuperclassNames' n
   defaultsMap <- M.map fst . M.unionsWith lowest -- Defaults from deeper subclasses take precidence
-             <$> mapM (\(n,i) -> M.map (,i) <$> providedDefaults n) sc
+             <$> mapM (\(n',i) -> M.map (,i) <$> providedDefaults n') sc
   return $ M.mapWithKey name_dec defaultsMap
-  where name_dec n def = ValD (VarP n) (NormalB (VarE def)) []
+  where name_dec n' def = ValD (VarP n') (NormalB (VarE def)) []
         lowest a@(_,i) b@(_,i') = if i <= i' then a else b
 
 -- | Get the default superclass method implementations provided by a subclass
